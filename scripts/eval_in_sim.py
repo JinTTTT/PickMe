@@ -109,14 +109,13 @@ with launch_simulation(env_cfg, args):
         outcome = "timeout"
         t = 0
         history: list[str] = []
+        planner_done = False  # planner thinks the task is finished; keep stepping for the placed window
         if planner is not None:
             obs, front = observation()
             p = planner.plan(front, obs["video"]["wrist"][0, 0], args.task_text, history)
             current_subtask[0] = p.get("subtask") or args.task_text
             print(f"[planner] -> {current_subtask[0]!r} (done={p.get('done')})", flush=True)
-            if p.get("done"):
-                # planner-level opinion only — success is still decided by the placed predicate
-                outcome = "planner_done"
+            planner_done = bool(p.get("done"))
         if args.record_dir:
             path = os.path.join(args.record_dir, f"episode_{ep:03d}.mp4")
             rec = subprocess.Popen(
@@ -152,6 +151,7 @@ with launch_simulation(env_cfg, args):
                     and args.verify_every > 0
                     and t % args.verify_every == 0
                     and outcome == "timeout"
+                    and not planner_done
                 ):
                     front_now = cams["front"].data.output["rgb"][0, :, :, :3].cpu().numpy().astype(np.uint8)
                     v = planner.verify(front_now, current_subtask[0])
@@ -162,8 +162,7 @@ with launch_simulation(env_cfg, args):
                         p = planner.plan(front, obs["video"]["wrist"][0, 0], args.task_text, history)
                         current_subtask[0] = p.get("subtask") or args.task_text
                         print(f"[planner] -> {current_subtask[0]!r} (done={p.get('done')})", flush=True)
-                        if p.get("done"):
-                            outcome = "planner_done"
+                        planner_done = bool(p.get("done"))
                         break  # stale chunk was predicted for the old subtask; re-query the policy
                 if t >= args.max_steps:
                     break
