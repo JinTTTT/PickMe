@@ -110,11 +110,12 @@ combine) and a 1.5 mm bore lining (**0.02 / 0.01**, `min` combine), allowing it 
 the peg without slipping from the fingers. Regenerate them with
 `"$ISAACLAB_PY" scripts/make_hanoi_collision.py`.
 
-Hanoi uses 240 Hz physics, 64 position / 8 velocity solver iterations, and 0.5 mm contact
+Hanoi uses 120 Hz physics, 64 position / 8 velocity solver iterations, and 0.5 mm contact
 offsets on disks and robot. The gripper runs at its normal 2 rad/s with a 0.05 Nm effort
 limit suitable for these light disks. Travel above the pegs uses the cube expert's normal
 12 mm per control step; insertion and extraction use 2 mm per step for the narrow clearance.
-Control and camera observations remain at 30 Hz.
+Control remains at 30 Hz. The scripted solver reads the camera only for stage snapshots;
+the learned policy still receives front-camera observations each control step.
 
 `CONTROL_SCENE=hanoi bash cloud.sh control "..."` runs the learned policy instead.
 

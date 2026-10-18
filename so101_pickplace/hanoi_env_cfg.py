@@ -128,8 +128,8 @@ class HanoiTerminationsCfg:
 
 def _configure_hanoi_contacts(cfg):
     """Resolve contacts for 8 mm thick, 2–5 g disks without driving the fingers through them."""
-    cfg.sim.dt = 1 / 240
-    cfg.decimation = 8  # Keep the observation / action rate at 30 Hz.
+    cfg.sim.dt = 1 / 120
+    cfg.decimation = 4  # Keep the observation / action rate at 30 Hz.
     cfg.sim.render_interval = cfg.decimation
     cfg.sim.physics.friction_correlation_distance = 0.001
     cfg.scene.robot.spawn.articulation_props.solver_position_iteration_count = 64
@@ -168,6 +168,9 @@ class SO101HanoiIKEnvCfg(SO101PickPlaceIKEnvCfg):
         _configure_hanoi_contacts(self)
         self.episode_length_s = 600.0
         self.events.randomize_joint_state.params["std"] = 0.0
+        # The scripted controller uses object poses. Keep the camera for snapshots, but
+        # avoid copying an RGB observation from the GPU on every control step.
+        self.observations.policy.front = None
         # This frame is 42 mm above the fixed fingertip. The controller places it 44 mm
         # above the disk bottom so the tip engages only the top disk, not the stack below.
         self.actions.arm_action.body_offset.pos = (0.0, 0.0, -0.062)

@@ -69,7 +69,7 @@ with launch_simulation(cfg, args):
             env.step(torch.cat((command, quat, torch.tensor([[jaw]], device=env.device)), dim=1))
             total_steps += 1
             error = (ee.data.target_pos_source.torch[:, 0, :] - target).norm().item()
-            if t >= 29 and error < tolerance:
+            if t >= 5 and error < tolerance:
                 break
         print(f"[hanoi] {label}: position error={error*1000:.1f} mm, steps={t+1}", flush=True)
         snapshot(label)
