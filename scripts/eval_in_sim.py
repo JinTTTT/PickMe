@@ -115,7 +115,8 @@ with launch_simulation(env_cfg, args):
             current_subtask[0] = p.get("subtask") or args.task_text
             print(f"[planner] -> {current_subtask[0]!r} (done={p.get('done')})", flush=True)
             if p.get("done"):
-                outcome = "success"
+                # planner-level opinion only — success is still decided by the placed predicate
+                outcome = "planner_done"
         if args.record_dir:
             path = os.path.join(args.record_dir, f"episode_{ep:03d}.mp4")
             rec = subprocess.Popen(
@@ -162,8 +163,8 @@ with launch_simulation(env_cfg, args):
                         current_subtask[0] = p.get("subtask") or args.task_text
                         print(f"[planner] -> {current_subtask[0]!r} (done={p.get('done')})", flush=True)
                         if p.get("done"):
-                            outcome = "success"
-                            break
+                            outcome = "planner_done"
+                        break  # stale chunk was predicted for the old subtask; re-query the policy
                 if t >= args.max_steps:
                     break
         if rec is not None:

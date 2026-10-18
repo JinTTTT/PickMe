@@ -30,7 +30,7 @@ from PIL import Image
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--model", type=str, default="nvidia/Cosmos-Reason2-2B")
-parser.add_argument("--host", type=str, default="*")
+parser.add_argument("--host", type=str, default="127.0.0.1", help="Bind address; the server is unauthenticated — keep localhost unless remote clients need it.")
 parser.add_argument("--port", type=int, default=5556)
 parser.add_argument("--device", type=str, default="cuda")
 parser.add_argument("--max_new_tokens", type=int, default=256)

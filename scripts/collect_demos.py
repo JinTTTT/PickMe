@@ -16,7 +16,7 @@ from _common import build_env_cfg, launch_simulation, make_parser, parse_args
 parser = make_parser(__doc__)
 parser.add_argument("--num_episodes", type=int, default=50, help="Successful episodes to record.")
 parser.add_argument("--dataset_root", type=str, required=True)
-parser.add_argument("--task_text", type=str, default="pick up the red block and place it on the green pad")
+parser.add_argument("--task_text", type=str, default="", help="Overall task; defaults per variant.")
 parser.add_argument("--max_steps", type=int, default=600, help="Per-episode step cap (30 Hz).")
 parser.add_argument("--success_steps", type=int, default=15, help="Consecutive success steps before ending an episode.")
 parser.add_argument("--stack", action="store_true", help="Stack variant: place the block on a second cube.")
@@ -24,6 +24,12 @@ parser.add_argument("--resume", action="store_true")
 parser.add_argument("--keep_failures", action="store_true", help="Also store failed episodes (not recommended).")
 parser.add_argument("--max_attempts", type=int, default=0, help="Give up after this many attempts (0 = 3x num_episodes).")
 args = parse_args(parser)
+if not args.task_text:
+    args.task_text = (
+        "pick up the red block and stack it on top of the green block"
+        if args.stack
+        else "pick up the red block and place it on the green pad"
+    )
 
 from so101_pickplace.pickplace_env_cfg import (  # noqa: E402
     CUBE2_SIZE,
