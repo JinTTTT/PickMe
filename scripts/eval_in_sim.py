@@ -18,7 +18,11 @@ from _common import PROJECT_ROOT, build_env_cfg, launch_simulation, make_parser,
 
 parser = make_parser(__doc__)
 parser.add_argument("--num_episodes", type=int, default=10)
-parser.add_argument("--task_text", type=str, default="pick up the red block and place it on the green pad")
+parser.add_argument("--task_text", type=str, default="", help="Overall task; defaults per variant.")
+parser.add_argument("--stack", action="store_true", help="Stack variant: place the block on a second cube.")
+parser.add_argument("--planner_host", type=str, default="", help="Cosmos planner host; empty = planner off.")
+parser.add_argument("--planner_port", type=int, default=5556)
+parser.add_argument("--verify_every", type=int, default=30, help="Steps between Cosmos verify calls (0 = off).")
 parser.add_argument("--policy_host", type=str, default="localhost")
 parser.add_argument("--policy_port", type=int, default=5555)
 parser.add_argument("--action_horizon", type=int, default=8, help="Predicted steps executed per policy query.")
@@ -26,10 +30,21 @@ parser.add_argument("--max_steps", type=int, default=600)
 parser.add_argument("--success_steps", type=int, default=15)
 parser.add_argument("--record_dir", type=str, default="", help="Save a front-camera mp4 per episode here.")
 args = parse_args(parser)
+if not args.task_text:
+    args.task_text = (
+        "pick up the red block and stack it on top of the green block"
+        if args.stack
+        else "pick up the red block and place it on the green pad"
+    )
 
-from so101_pickplace.pickplace_env_cfg import IMAGE_HEIGHT, IMAGE_WIDTH, SO101PickPlaceJointEnvCfg  # noqa: E402
+from so101_pickplace.pickplace_env_cfg import (  # noqa: E402
+    IMAGE_HEIGHT,
+    IMAGE_WIDTH,
+    SO101PickPlaceJointEnvCfg,
+    SO101PickPlaceStackJointEnvCfg,
+)
 
-env_cfg = build_env_cfg(SO101PickPlaceJointEnvCfg, args)
+env_cfg = build_env_cfg(SO101PickPlaceStackJointEnvCfg if args.stack else SO101PickPlaceJointEnvCfg, args)
 assert env_cfg.scene.num_envs == 1
 
 with launch_simulation(env_cfg, args):
@@ -38,10 +53,20 @@ with launch_simulation(env_cfg, args):
     import torch
 
     import so101_pickplace  # noqa: F401
-    from so101_pickplace import TASK_JOINT, mdp
+    from so101_pickplace import TASK_JOINT, TASK_STACK_JOINT, mdp
+    from so101_pickplace.cosmos_planner import CosmosPlannerClient
     from so101_pickplace.gr00t_client import Gr00tClient, add_batch_time_dims
     from so101_pickplace.so101_units import JOINTS, norm_to_rad, rad_to_norm
 
+    planner = None
+    if args.planner_host:
+        planner = CosmosPlannerClient(args.planner_host, args.planner_port)
+        if not planner.ping():
+            raise SystemExit(
+                f"cosmos planner not reachable at {args.planner_host}:{args.planner_port} "
+                "(run scripts/cosmos_planner_server.py in the GR00T venv)"
+            )
+        print("[eval] cosmos planner connected", flush=True)
     client = Gr00tClient(args.policy_host, args.policy_port)
     if not client.ping():
         raise SystemExit(f"policy server not reachable at {args.policy_host}:{args.policy_port} (run start_server.sh)")
@@ -52,7 +77,8 @@ with launch_simulation(env_cfg, args):
     if got != expected:
         raise SystemExit(f"checkpoint modality layout {got} != {expected}")
 
-    env = gym.make(TASK_JOINT, cfg=env_cfg).unwrapped
+    placed = mdp.cube_stacked if args.stack else mdp.cube_placed
+    env = gym.make(TASK_STACK_JOINT if args.stack else TASK_JOINT, cfg=env_cfg).unwrapped
     env.reset(seed=args.seed)
     robot = env.scene["robot"]
     jidx, _ = robot.find_joints(JOINTS, preserve_order=True)
@@ -70,10 +96,11 @@ with launch_simulation(env_cfg, args):
         obs = {
             "video": {"front": np.ascontiguousarray(imgs["front"]), "wrist": np.ascontiguousarray(imgs["wrist"])},
             "state": {"single_arm": state[:5].astype(np.float32), "gripper": state[5:6].astype(np.float32)},
-            "language": {"annotation.human.task_description": args.task_text},
+            "language": {"annotation.human.task_description": current_subtask[0]},
         }
         return add_batch_time_dims(obs), imgs["front"]
 
+    current_subtask = [args.task_text]
     results = []
     latencies = []
     for ep in range(args.num_episodes):
@@ -81,6 +108,14 @@ with launch_simulation(env_cfg, args):
         success_count = 0
         outcome = "timeout"
         t = 0
+        history: list[str] = []
+        if planner is not None:
+            obs, front = observation()
+            p = planner.plan(front, obs["video"]["wrist"][0, 0], args.task_text, history)
+            current_subtask[0] = p.get("subtask") or args.task_text
+            print(f"[planner] -> {current_subtask[0]!r} (done={p.get('done')})", flush=True)
+            if p.get("done"):
+                outcome = "success"
         if args.record_dir:
             path = os.path.join(args.record_dir, f"episode_{ep:03d}.mp4")
             rec = subprocess.Popen(
@@ -104,13 +139,31 @@ with launch_simulation(env_cfg, args):
                 if bool(mdp.cube_dropped(env)[0]):
                     outcome = "dropped"
                     break
-                if bool(mdp.cube_placed(env)[0]):
+                if bool(placed(env)[0]):
                     success_count += 1
                     if success_count >= args.success_steps:
                         outcome = "success"
                         break
                 else:
                     success_count = 0
+                if (
+                    planner is not None
+                    and args.verify_every > 0
+                    and t % args.verify_every == 0
+                    and outcome == "timeout"
+                ):
+                    front_now = cams["front"].data.output["rgb"][0, :, :, :3].cpu().numpy().astype(np.uint8)
+                    v = planner.verify(front_now, current_subtask[0])
+                    print(f"[planner] verify {current_subtask[0]!r}: {v.get('done')} — {v.get('reason', '')}", flush=True)
+                    if v.get("done"):
+                        history.append(current_subtask[0])
+                        obs, front = observation()
+                        p = planner.plan(front, obs["video"]["wrist"][0, 0], args.task_text, history)
+                        current_subtask[0] = p.get("subtask") or args.task_text
+                        print(f"[planner] -> {current_subtask[0]!r} (done={p.get('done')})", flush=True)
+                        if p.get("done"):
+                            outcome = "success"
+                            break
                 if t >= args.max_steps:
                     break
         if rec is not None:

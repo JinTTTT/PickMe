@@ -24,7 +24,7 @@ ZeroMQ), with the Arena/G1 pieces replaced by SO-101 equivalents.
 
 | Path | What |
 |---|---|
-| `so101_pickplace/` | Isaac Lab task package: env config (3 variants), MDP terms, scripted expert, LeRobot writer, GR00T client, unit conventions |
+| `so101_pickplace/` | Isaac Lab task package: env config (pick-place / stack / teleop variants), MDP terms, scripted expert, LeRobot writer, GR00T client, Cosmos planner client, unit conventions |
 | `scripts/` | `collect_demos.py`, `eval_in_sim.py`, `hdf5_to_lerobot.py`, `view_env.py` (diagnostics), `calibrate_grasp.py` |
 | `gr00t/` | `so101_sim_config.py` (modality config), `modality.json`, `check_dataset.py` |
 | `assets/cube_blocks/` | printable blocks (`stl/`), Isaac USD twins (`usd/`), `manifest.json` |
@@ -34,6 +34,8 @@ ZeroMQ), with the Arena/G1 pieces replaced by SO-101 equivalents.
 Gym ids: `Isaac-PickPlace-Cube-SO101-IK-v0` (pose-IK action, used by the expert),
 `Isaac-PickPlace-Cube-SO101-Joint-v0` (absolute joint targets, what GR00T outputs — used for eval
 and teleop conversion), `Isaac-PickPlace-Cube-SO101-Joint-Teleop-v0` (leader arm via IsaacTeleop).
+Stack variants (pad replaced by a second cube): `Isaac-Stack-Cube-SO101-IK-v0`,
+`Isaac-Stack-Cube-SO101-Joint-v0` — select with `--stack` in `collect_demos.py` / `eval_in_sim.py`.
 
 ## Requirements
 
@@ -93,6 +95,31 @@ $ISAACLAB_PY scripts/view_env.py --run_policy 600 --viz kit   # watch the expert
   of random scenes (6/8 in the probe run), episodes are ~300 frames (10 s at 30 Hz) and an attempt
   costs ~25 s wall-clock including rendering of both 640×480 cameras. Failed attempts are discarded,
   so `NUM_EPISODES` counts successful demonstrations.
+
+## Stack variant and Cosmos planner
+
+`--stack` swaps the green pad for a second printable cube (`CUBE2_SIZE_MM`, `CUBE2_COLOR` env
+vars, green 30 mm by default) and the success term for `mdp.cube_stacked` (block resting on top,
+released, gripper clear). `collect_demos.py --stack` records stacking demos with the same expert
+(`ScriptedPolicyCfg(stack=True)`), so a stack dataset goes through the same
+`prepare_dataset.sh` → `finetune.sh` → `eval.sh --stack` pipeline.
+
+**Cosmos-Reason2 planner** (`scripts/cosmos_planner_server.py` + `so101_pickplace/cosmos_planner.py`):
+Cosmos-Reason2 runs as a high-level VLM above GR00T — given the camera frames and an overall task
+it emits the next pick/place subtask as GR00T instruction text, and visually verifies each subtask
+(`eval_in_sim.py --verify_every`). This is the layer that will later decompose multi-step tasks
+like "move the chess pieces to the right squares". It runs in the GR00T uv venv (transformers +
+the gated `nvidia/Cosmos-Reason2-2B` weights) over the same ZeroMQ/msgpack protocol as the policy
+server, port `PLANNER_PORT` (5556):
+
+```bash
+./start_planner.sh                                        # terminal 0: Cosmos-Reason2 planner
+./start_server.sh                                         # terminal 1: GR00T policy server
+./eval.sh --num_episodes 20 --stack --planner_host localhost   # terminal 2: planned closed-loop eval
+```
+
+`--planner_host` empty = planner off. The ground-truth `cube_placed`/`cube_stacked` terms still
+decide the reported success rate; the planner only steers which subtask text GR00T sees.
 
 ## Dataset conventions
 

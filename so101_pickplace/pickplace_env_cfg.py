@@ -5,13 +5,15 @@ task), one red block, one flat green target pad, a fixed third-person ``front`` 
 ``wrist`` camera on the gripper link -- the two views the SO-100/SO-101 GR00T modality config
 (``examples/SO100/so100_config.py``) expects.
 
-Three variants share the scene and differ only in the action space:
+Five variants share the scene and differ only in the action space / target:
 
 * :class:`SO101PickPlaceIKEnvCfg`     -- task-space pose IK (used by the scripted demo collector).
 * :class:`SO101PickPlaceJointEnvCfg`  -- absolute joint targets [rad] (used for GR00T closed-loop
   evaluation and for converting leader-arm recordings).
 * :class:`SO101PickPlaceTeleopEnvCfg` -- joint env + IsaacTeleop leader-arm pipeline for
   ``scripts/tools/record_demos.py`` (requires the optional ``isaacteleop`` package).
+* :class:`SO101PickPlaceStackIKEnvCfg` / :class:`SO101PickPlaceStackJointEnvCfg` -- the target pad
+  replaced by a second printable cube; success = the first block resting on top (``cube_stacked``).
 """
 
 from __future__ import annotations
@@ -68,10 +70,17 @@ CUBE_USD = os.path.join(ASSETS_DIR, "cube_blocks", "usd", f"cube_{CUBE_SIZE_MM}m
 CUBE_SIZE = CUBE_SIZE_MM / 1000.0
 PAD_SIZE = (0.09, 0.09, 0.004)
 
+# Stack variant: the pick-and-place pad is replaced by a second printable cube (green by default).
+CUBE2_SIZE_MM = int(os.environ.get("CUBE2_SIZE_MM", str(CUBE_SIZE_MM)))
+CUBE2_COLOR = os.environ.get("CUBE2_COLOR", "green")
+CUBE2_USD = os.path.join(ASSETS_DIR, "cube_blocks", "usd", f"cube_{CUBE2_SIZE_MM}mm_{CUBE2_COLOR}.usda")
+CUBE2_SIZE = CUBE2_SIZE_MM / 1000.0
+
 # Workspace in the env frame [m]. The robot base is at the origin, rotated 90 deg about +Z so the
 # arm faces +X (same seat as the contrib stack task). Block spawns on the +Y half, pad on the -Y half.
 CUBE_POSE_RANGE = {"x": (0.16, 0.27), "y": (0.02, 0.13), "z": (CUBE_SIZE / 2, CUBE_SIZE / 2), "yaw": (-0.8, 0.8)}
 PAD_POSE_RANGE = {"x": (0.16, 0.27), "y": (-0.15, -0.04), "z": (PAD_SIZE[2] / 2, PAD_SIZE[2] / 2), "yaw": (0.0, 0.0)}
+CUBE2_POSE_RANGE = {"x": (0.16, 0.27), "y": (-0.15, -0.04), "z": (CUBE2_SIZE / 2, CUBE2_SIZE / 2), "yaw": (-0.8, 0.8)}
 
 # Seat pose (see contrib stack task for the derivation of the Z correction and 90 deg yaw).
 _SO101_MOUNT_Z = -0.03008
@@ -450,6 +459,40 @@ class SO101PickPlaceJointEnvCfg(SO101PickPlaceBaseEnvCfg):
         self.actions.gripper_action = JointPositionActionCfg(
             asset_name="robot", joint_names=["gripper"], scale=1.0, use_default_offset=False
         )
+
+
+class _StackMixin:
+    """Replaces the target pad with a second printable cube and the success term with stacking."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.target = RigidObjectCfg(
+            prim_path="{ENV_REGEX_NS}/Target",
+            init_state=RigidObjectCfg.InitialStateCfg(pos=[0.21, -0.09, CUBE2_SIZE / 2], rot=[0, 0, 0, 1]),
+            spawn=UsdFileCfg(
+                usd_path=CUBE2_USD,
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                    solver_position_iteration_count=16,
+                    solver_velocity_iteration_count=1,
+                    max_depenetration_velocity=5.0,
+                    disable_gravity=False,
+                ),
+                semantic_tags=[("class", "cube2")],
+            ),
+        )
+        self.events.randomize_target_pose.params["pose_range"] = CUBE2_POSE_RANGE
+        self.observations.subtask_terms.place = ObsTerm(func=mdp.cube_stacked)
+        self.terminations.success = DoneTerm(func=mdp.cube_stacked)
+
+
+@configclass
+class SO101PickPlaceStackIKEnvCfg(_StackMixin, SO101PickPlaceIKEnvCfg):
+    """Two-block stack variant driven by pose IK (scripted expert, demo collection)."""
+
+
+@configclass
+class SO101PickPlaceStackJointEnvCfg(_StackMixin, SO101PickPlaceJointEnvCfg):
+    """Two-block stack variant driven by absolute joint targets (GR00T closed-loop eval)."""
 
 
 @configclass

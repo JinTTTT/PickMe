@@ -26,6 +26,9 @@ export FINETUNE_OUTPUT="${FINETUNE_OUTPUT:-$HOME/Desktop/nvidia/finetune/$DATASE
 export CHECKPOINT="${CHECKPOINT:-}"           # set to $FINETUNE_OUTPUT/checkpoint-<N> for start_server.sh
 export POLICY_HOST=localhost
 export POLICY_PORT=5555
+# Cosmos-Reason2 high-level planner (scripts/cosmos_planner_server.py, eval_in_sim --planner_host)
+export PLANNER_PORT="${PLANNER_PORT:-5556}"
+export COSMOS_MODEL="${COSMOS_MODEL:-nvidia/Cosmos-Reason2-2B}"
 
 # N1.7 loads the gated nvidia/Cosmos-Reason2-2B backbone from the Hub (do not set HF_HUB_OFFLINE)
 unset HF_HUB_OFFLINE
