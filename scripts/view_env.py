@@ -1,7 +1,7 @@
 """Diagnostics for the SO-101 pick-and-place scene.
 
 Prints the joint order / limits / body names, the grasp-point and jaw poses in the base frame,
-saves the front and wrist camera images, and (optionally) runs the scripted expert while dumping
+saves the front camera image and (optionally) runs the scripted expert while dumping
 frames -- used to tune the constants at the top of ``pickplace_env_cfg.py``.
 
     python scripts/view_env.py                      # headless, prints + saves logs/view/*.png
@@ -12,6 +12,7 @@ frames -- used to tune the constants at the top of ``pickplace_env_cfg.py``.
 from __future__ import annotations
 
 import os
+import time
 
 from _common import PROJECT_ROOT, build_env_cfg, launch_simulation, make_parser, parse_args
 
@@ -20,6 +21,7 @@ parser.add_argument("--run_policy", type=int, default=0, help="Run the scripted 
 parser.add_argument("--frame_stride", type=int, default=20)
 parser.add_argument("--out_dir", type=str, default=os.path.join(PROJECT_ROOT, "logs", "view"))
 parser.add_argument("--init_joints", type=str, default="", help='Override reset joints, e.g. "wrist_flex=1.4,elbow_flex=0.9".')
+parser.add_argument("--keep_open", action="store_true", help="Keep the simulator window open after the demo.")
 args = parse_args(parser)
 
 from so101_pickplace.pickplace_env_cfg import CUBE_SIZE, PAD_SIZE, SO101PickPlaceIKEnvCfg  # noqa: E402
@@ -43,6 +45,7 @@ with launch_simulation(env_cfg, args):
 
     os.makedirs(args.out_dir, exist_ok=True)
     env = gym.make(TASK_IK, cfg=env_cfg).unwrapped
+    env.sim.set_camera_view(eye=(0.65, 0.45, 0.45), target=(0.18, 0.0, 0.04))
     obs, _ = env.reset(seed=args.seed)
     robot = env.scene["robot"]
     ee = env.scene["ee_frame"]
@@ -129,7 +132,7 @@ with launch_simulation(env_cfg, args):
     print("=== obs shapes:", {k: tuple(v.shape) for k, v in obs["policy"].items()})
 
     def save_images(tag: str):
-        for cam in ("front", "wrist"):
+        for cam in ("front",):
             img = env.scene[f"{cam}_cam"].data.output["rgb"][0, :, :, :3].cpu().numpy().astype(np.uint8)
             imageio.imwrite(os.path.join(args.out_dir, f"{tag}_{cam}.png"), img)
 
@@ -171,4 +174,9 @@ with launch_simulation(env_cfg, args):
                 break
         print("=== final: placed =", bool(mdp.cube_placed(env)[0]), " cube pose in base:", fmt(mdp.object_pose_in_base(env, __import__('isaaclab.managers', fromlist=['SceneEntityCfg']).SceneEntityCfg('cube'))[0]))
         save_images("final")
+    if args.keep_open:
+        print("VIEWER_READY", flush=True)
+        while True:
+            env.sim.render()
+            time.sleep(1 / 30)
     env.close()

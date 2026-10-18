@@ -39,9 +39,8 @@ def build_env_cfg(cfg_cls, args: argparse.Namespace, disable_terminations: bool 
     cfg.seed = args.seed
     if disable_terminations:
         # the scripts decide when an episode ends; never let the env auto-reset mid-recording
-        cfg.terminations.time_out = None
-        cfg.terminations.cube_dropped = None
-        cfg.terminations.success = None
+        for name in list(vars(cfg.terminations)):
+            setattr(cfg.terminations, name, None)
     cfg.validate()
     return cfg
 

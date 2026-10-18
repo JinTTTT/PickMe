@@ -1,11 +1,13 @@
 # SO-101 block pick-and-place in Isaac Sim → GR00T N1.7 post-training
 
+For the configured Nebius VM and browser UI, start with [cloud/README.md](cloud/README.md).
+
 An Isaac Lab 3.0 / Isaac Sim 6.1 environment in which a TheRobotStudio **SO-101** arm picks a
 3D-printed block and places it on a target pad, plus everything needed to turn that into a
 **GR00T N1.7** post-training loop:
 
 * a scripted expert that records demonstrations straight into a **LeRobot v2.1** dataset
-  (front + wrist camera videos, LeRobot-style joint units) — no teleop hardware needed;
+  (front camera video, LeRobot-style joint units) — no teleop hardware needed;
 * an optional leader-arm teleop variant (IsaacTeleop) + HDF5→LeRobot converter;
 * GR00T N1.7 modality config / `modality.json` and the fine-tune, serve and
   **closed-loop sim evaluation** scripts (ZeroMQ client, success rate over N episodes);
@@ -13,7 +15,7 @@ An Isaac Lab 3.0 / Isaac Sim 6.1 environment in which a TheRobotStudio **SO-101*
   the one you print for the real arm.
 
 It follows the Hugging Face blog *[GR00T N1.5 SO-101 tuning](https://huggingface.co/blog/nvidia/gr00t-n1-5-so101-tuning)*
-(dataset layout, `modality.json`, `new_embodiment` tag, front+wrist cameras, finetune / inference /
+(dataset layout, `modality.json`, `new_embodiment` tag, front camera, finetune / inference /
 eval flow, updated to the N1.7 CLI) and NVIDIA's *[GR00T end-to-end workflow – simulation](https://docs.nvidia.com/learning/physical-ai/gr00t-e2e-workflow/latest/simulation-workflow/groot-fine-tuning-sim.html)*
 (record in Isaac Lab → export LeRobot → fine-tune with the LLM frozen → closed-loop sim eval over
 ZeroMQ), with the Arena/G1 pieces replaced by SO-101 equivalents.
@@ -53,8 +55,8 @@ and teleop conversion), `Isaac-PickPlace-Cube-SO101-Joint-Teleop-v0` (leader arm
 ## Quick start
 
 ```bash
-git clone https://github.com/ddiddi/so101-sim-pickplace-gr00t.git
-cd so101-sim-pickplace-gr00t
+git clone https://github.com/JinTTTT/PickMe.git
+cd PickMe
 $EDITOR env.sh                      # ISAACLAB_PY, ISAACLAB_DIR, GR00T_REPO, dataset name, task text
 
 source env.sh
@@ -71,6 +73,53 @@ $ISAACLAB_PY scripts/view_env.py --run_policy 600 --viz kit   # watch the expert
 
 ## The environment
 
+### Tower of Hanoi: scripted solver
+
+The three-disk Hanoi scene can be solved with deterministic inverse-kinematics waypoints.
+It uses simulation poses for feedback and moves the disks through gripper contact and gravity;
+no model, policy server, or training checkpoint is needed.
+
+From `results/PickMe` on your Mac, start the browser connection in one terminal:
+
+```bash
+bash cloud.sh ui
+```
+
+Open <http://localhost:6080/vnc.html?autoconnect=true&resize=scale>. Leave the UI terminal
+running, then start the solver in another terminal:
+
+```bash
+bash cloud.sh hanoi
+```
+
+The solver executes the seven legal moves from the left peg to the right peg, verifies each
+placement, and holds the final scene. Press Ctrl-C to close it before starting another run.
+Results and front-camera snapshots are written to `~/work/PickMe/logs/hanoi-scripted/` on
+the VM. `bash cloud.sh hanoi --moves 1` runs just the first transfer.
+
+To run directly on the VM:
+
+```bash
+cd ~/work/PickMe && source env.sh
+DISPLAY=:99 "$ISAACLAB_PY" -u scripts/solve_hanoi.py --viz kit --keep_open
+```
+
+The Hanoi collision wrappers in `assets/Tower_of_Hanoi/sim/` preserve the supplied visuals
+and masses. Each disk has a grippy outer ring (static/dynamic friction **1.5 / 1.2**, `max`
+combine) and a 1.5 mm bore lining (**0.02 / 0.01**, `min` combine), allowing it to slide along
+the peg without slipping from the fingers. Regenerate them with
+`"$ISAACLAB_PY" scripts/make_hanoi_collision.py`.
+
+Hanoi uses 240 Hz physics, 64 position / 8 velocity solver iterations, and 0.5 mm contact
+offsets on disks and robot. The gripper runs at its normal 2 rad/s with a 0.05 Nm effort
+limit suitable for these light disks. Travel above the pegs uses the cube expert's normal
+12 mm per control step; insertion and extraction use 2 mm per step for the narrow clearance.
+Control and camera observations remain at 30 Hz.
+
+`CONTROL_SCENE=hanoi bash cloud.sh control "..."` runs the learned policy instead.
+
+### Cube pick-and-place
+
 * SO-101 (`SO101_HIGH_PD_CFG`, gentle effort-limited gripper) seated on the SeattleLab table exactly
   like the Isaac Lab contrib `IsaacContrib-Stack-Cube-SO101-*` tasks; reset pose has the jaws
   pointing straight down. 30 Hz control (60 Hz PhysX, decimation 2) = LeRobot's 30 fps.
@@ -79,8 +128,7 @@ $ISAACLAB_PY scripts/view_env.py --run_policy 600 --viz kit   # watch the expert
   friction). `CUBE_SIZE_MM=25|30|40` and `CUBE_COLOR=red|green|blue|yellow` select another twin.
   Spawned at random on the +Y half of the workspace with random yaw; a 90 mm green pad spawns on
   the −Y half.
-* **Cameras**: `front` (fixed, 640×480, looking at the arm over the table) and `wrist` (640×480 on
-  the gripper link, looking down the jaws) — the two keys of the SO-100 GR00T modality config.
+* **Camera**: `front` (fixed, 640×480, looking at the arm over the table).
 * **Success**: block resting inside the pad footprint, jaw open, grasp point clear of the block.
 * **Expert** (`scripted_policy.py`): open → hover → descend → close → lift (with a lift check and
   up to two re-grasps) → hover pad → lower → release → retreat, in task space through the
@@ -91,7 +139,7 @@ $ISAACLAB_PY scripts/view_env.py --run_policy 600 --viz kit   # watch the expert
   the block size or the robot asset.
 * Measured on the development machine (DGX Spark, PhysX, headless): the expert succeeds on ~75 %
   of random scenes (6/8 in the probe run), episodes are ~300 frames (10 s at 30 Hz) and an attempt
-  costs ~25 s wall-clock including rendering of both 640×480 cameras. Failed attempts are discarded,
+  costs ~25 s wall-clock including rendering the 640×480 camera. Failed attempts are discarded,
   so `NUM_EPISODES` counts successful demonstrations.
 
 ## Dataset conventions
@@ -177,13 +225,14 @@ Nebius Object Storage (S3-compatible, `https://storage.eu-north1.nebius.cloud`) 
 
 ```bash
 ssh ubuntu@<public-ip>
-curl -sL https://raw.githubusercontent.com/ddiddi/so101-sim-pickplace-gr00t/main/nebius/setup_vm.sh | bash
+cd ~/work/PickMe
+bash nebius/setup_vm.sh
 ```
 
-`setup_vm.sh` installs system deps, Isaac Sim 6.1 (pip) + Isaac Lab 3.0.0 into `~/work/env_isaaclab`,
-Isaac-GR00T (uv, Python 3.12) with the N1.7-3B weights into `~/work/Isaac-GR00T`, and clones this
-repo into `~/work/so101_sim_pickplace`. It pauses once for `huggingface-cli login` (the
-Cosmos-Reason2-2B backbone is gated: accept its terms on the Hub first). Then edit `env.sh`:
+The deployment installer in this checkout installs Isaac Sim 6.1.0 and pinned Isaac Lab
+v3.0.0-EA into `~/work/env_isaaclab`, plus pinned Isaac-GR00T in its separate Python 3.12
+environment at `~/work/Isaac-GR00T`. It uses the existing PickMe checkout.
+Paths in `env.sh` already point to these cloud environments:
 
 ```bash
 export ISAACLAB_PY=$HOME/work/env_isaaclab/bin/python
@@ -191,13 +240,14 @@ export ISAACLAB_DIR=$HOME/work/IsaacLab
 export GR00T_REPO=$HOME/work/Isaac-GR00T
 ```
 
-and in `gr00t_activate` drop the two DGX-Spark-only lines (`activate_spark.sh`, `nvpl`) — on x86_64
-`source .venv/bin/activate` is enough.
+Download the base weights with `bash cloud/download_model.sh`. The gated
+Cosmos-Reason2-2B backbone additionally requires accepting its access terms and running
+`~/work/Isaac-GR00T/.venv/bin/hf auth login` privately on the VM.
 
 ### 3. Run the loop headless
 
 ```bash
-cd ~/work/so101_sim_pickplace && source env.sh
+cd ~/work/PickMe && source env.sh
 export OMNI_KIT_ACCEPT_EULA=YES
 NUM_EPISODES=3 ./collect.sh && ./prepare_dataset.sh       # smoke test (first run downloads assets, ~5 min)
 NUM_EPISODES=100 ./collect.sh --resume                     # ~20 s per episode on an L40S
@@ -241,3 +291,7 @@ nebius compute disk delete --id <BOOT_DISK_ID>
 
 License: Apache-2.0. The SO-101 asset is NVIDIA's `so101_new_calib` USD; Isaac-GR00T and Isaac Lab
 are Apache-2.0 / BSD-3-Clause respectively.
+
+## Configured cloud workstation
+
+See [cloud/README.md](cloud/README.md) for the Nebius workstation, browser UI, SSH commands, pinned installer, and model authentication.

@@ -27,7 +27,6 @@ exec bash examples/finetune.sh \
     --modality-config-path "$MODALITY_CONFIG" \
     --embodiment-tag "$EMBODIMENT_TAG" \
     --output-dir "$FINETUNE_OUTPUT" \
-    --save-only-model \
     "$@" \
     -- --no-tune-llm --tune-visual --tune-projector --tune-diffusion-model \
     2>&1 | tee -a "$FINETUNE_OUTPUT/train.log"
