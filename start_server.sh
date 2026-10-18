@@ -13,4 +13,4 @@ exec python gr00t/eval/run_gr00t_server.py \
     --model-path "$CHECKPOINT" \
     --modality-config-path "$MODALITY_CONFIG" \
     --embodiment-tag "$EMBODIMENT_TAG" \
-    --device cuda --host 0.0.0.0 --port "$POLICY_PORT" "$@"
+    --device cuda --host "$POLICY_HOST" --port "$POLICY_PORT" "$@"

@@ -3,8 +3,9 @@
 Start the policy server first (``start_server.sh``), then:
 
     python scripts/eval_in_sim.py --num_episodes 20 --task_text "..." [--viz kit] [--record_dir logs/eval]
+    python scripts/eval_in_sim.py --scene hanoi --viz kit --keep_open   # Tower of Hanoi board instead of the cube
 
-Observations are built exactly like the dataset (front/wrist 640x480 RGB, state in LeRobot
+Observations are built exactly like the dataset (front 640x480 RGB, state in LeRobot
 normalised units); the returned action chunk (``single_arm`` 16x5, ``gripper`` 16x1) is converted
 back to radians and executed on the joint-space env for ``--action_horizon`` steps per query.
 """
@@ -12,30 +13,28 @@ back to radians and executed on the joint-space env for ``--action_horizon`` ste
 from __future__ import annotations
 
 import os
+import json
 import time
 
 from _common import PROJECT_ROOT, build_env_cfg, launch_simulation, make_parser, parse_args
 
 parser = make_parser(__doc__)
 parser.add_argument("--num_episodes", type=int, default=10)
-parser.add_argument("--task_text", type=str, default="", help="Overall task; defaults per variant.")
-parser.add_argument("--stack", action="store_true", help="Stack variant: place the block on a second cube.")
+parser.add_argument("--scene", choices=("cube", "hanoi"), default="cube", help="cube pick-and-place or Tower of Hanoi board.")
+parser.add_argument("--stack", action="store_true", help="Stack variant (cube scene): place the block on a second cube.")
 parser.add_argument("--planner_host", type=str, default="", help="Cosmos planner host; empty = planner off.")
 parser.add_argument("--planner_port", type=int, default=5556)
 parser.add_argument("--verify_every", type=int, default=30, help="Steps between Cosmos verify calls (0 = off).")
+parser.add_argument("--task_text", type=str, default=None, help="Language instruction (default depends on --scene).")
 parser.add_argument("--policy_host", type=str, default="localhost")
 parser.add_argument("--policy_port", type=int, default=5555)
 parser.add_argument("--action_horizon", type=int, default=8, help="Predicted steps executed per policy query.")
-parser.add_argument("--max_steps", type=int, default=600)
+parser.add_argument("--max_steps", type=int, default=None, help="Steps per episode (default: 600 cube, 3600 hanoi).")
 parser.add_argument("--success_steps", type=int, default=15)
 parser.add_argument("--record_dir", type=str, default="", help="Save a front-camera mp4 per episode here.")
+parser.add_argument("--results_file", type=str, default="", help="Save evaluation outcomes and inference latency as JSON.")
+parser.add_argument("--keep_open", action="store_true", help="Keep the final scene visible after evaluation.")
 args = parse_args(parser)
-if not args.task_text:
-    args.task_text = (
-        "pick up the red block and stack it on top of the green block"
-        if args.stack
-        else "pick up the red block and place it on the green pad"
-    )
 
 from so101_pickplace.pickplace_env_cfg import (  # noqa: E402
     IMAGE_HEIGHT,
@@ -44,7 +43,18 @@ from so101_pickplace.pickplace_env_cfg import (  # noqa: E402
     SO101PickPlaceStackJointEnvCfg,
 )
 
-env_cfg = build_env_cfg(SO101PickPlaceStackJointEnvCfg if args.stack else SO101PickPlaceJointEnvCfg, args)
+if args.scene == "hanoi":
+    from so101_pickplace.hanoi_env_cfg import HANOI_DROP_PARAMS, HANOI_SUCCESS_PARAMS, HANOI_TASK, SO101HanoiJointEnvCfg  # noqa: E402
+
+    env_cfg_cls, default_task, default_max_steps = SO101HanoiJointEnvCfg, HANOI_TASK, 3600
+elif args.stack:
+    env_cfg_cls = SO101PickPlaceStackJointEnvCfg
+    default_task, default_max_steps = "pick up the red block and stack it on top of the green block", 600
+else:
+    env_cfg_cls, default_task, default_max_steps = SO101PickPlaceJointEnvCfg, "pick up the red block and place it on the green pad", 600
+args.task_text = args.task_text or default_task
+args.max_steps = args.max_steps or default_max_steps
+env_cfg = build_env_cfg(env_cfg_cls, args)
 assert env_cfg.scene.num_envs == 1
 
 with launch_simulation(env_cfg, args):
@@ -53,10 +63,19 @@ with launch_simulation(env_cfg, args):
     import torch
 
     import so101_pickplace  # noqa: F401
-    from so101_pickplace import TASK_JOINT, TASK_STACK_JOINT, mdp
+    from so101_pickplace import TASK_HANOI_JOINT, TASK_JOINT, TASK_STACK_JOINT, mdp
     from so101_pickplace.cosmos_planner import CosmosPlannerClient
     from so101_pickplace.gr00t_client import Gr00tClient, add_batch_time_dims
     from so101_pickplace.so101_units import JOINTS, norm_to_rad, rad_to_norm
+
+    if args.scene == "hanoi":
+        task_id = TASK_HANOI_JOINT
+        is_dropped = lambda env: mdp.disk_dropped(env, **HANOI_DROP_PARAMS)  # noqa: E731
+        is_success = lambda env: mdp.hanoi_solved(env, **HANOI_SUCCESS_PARAMS)  # noqa: E731
+    elif args.stack:
+        task_id, is_dropped, is_success = TASK_STACK_JOINT, mdp.cube_dropped, mdp.cube_stacked
+    else:
+        task_id, is_dropped, is_success = TASK_JOINT, mdp.cube_dropped, mdp.cube_placed
 
     planner = None
     if args.planner_host:
@@ -67,23 +86,28 @@ with launch_simulation(env_cfg, args):
                 "(run scripts/cosmos_planner_server.py in the GR00T venv)"
             )
         print("[eval] cosmos planner connected", flush=True)
+
     client = Gr00tClient(args.policy_host, args.policy_port)
     if not client.ping():
         raise SystemExit(f"policy server not reachable at {args.policy_host}:{args.policy_port} (run start_server.sh)")
     mc = client.get_modality_config()
     print("[eval] server modality config:", {k: v.get("modality_keys") for k, v in mc.items()})
-    expected = {"video": ["front", "wrist"], "state": ["single_arm", "gripper"], "action": ["single_arm", "gripper"]}
+    expected = {"video": ["front"], "state": ["single_arm", "gripper"], "action": ["single_arm", "gripper"]}
     got = {k: list(mc[k]["modality_keys"]) for k in expected}
     if got != expected:
         raise SystemExit(f"checkpoint modality layout {got} != {expected}")
 
-    placed = mdp.cube_stacked if args.stack else mdp.cube_placed
-    env = gym.make(TASK_STACK_JOINT if args.stack else TASK_JOINT, cfg=env_cfg).unwrapped
+    env = gym.make(task_id, cfg=env_cfg).unwrapped
+    env.sim.set_camera_view(eye=(0.65, 0.45, 0.45), target=(0.18, 0.0, 0.04))
     env.reset(seed=args.seed)
     robot = env.scene["robot"]
     jidx, _ = robot.find_joints(JOINTS, preserve_order=True)
     jidx = torch.as_tensor(jidx, device=env.device)
-    cams = {k: env.scene[f"{k}_cam"] for k in ("front", "wrist")}
+    cams = {"front": env.scene["front_cam"]}
+    try:
+        wrist_cam = env.scene["wrist_cam"]
+    except KeyError:  # hanoi board has no wrist camera; planner falls back to the front view
+        wrist_cam = None
     rec = None
     if args.record_dir:
         import subprocess
@@ -94,11 +118,20 @@ with launch_simulation(env_cfg, args):
         state = rad_to_norm(robot.data.joint_pos.torch[0, jidx].cpu().numpy())
         imgs = {k: c.data.output["rgb"][0, :, :, :3].cpu().numpy().astype(np.uint8) for k, c in cams.items()}
         obs = {
-            "video": {"front": np.ascontiguousarray(imgs["front"]), "wrist": np.ascontiguousarray(imgs["wrist"])},
+            "video": {"front": np.ascontiguousarray(imgs["front"])},
             "state": {"single_arm": state[:5].astype(np.float32), "gripper": state[5:6].astype(np.float32)},
             "language": {"annotation.human.task_description": current_subtask[0]},
         }
         return add_batch_time_dims(obs), imgs["front"]
+
+    def planner_images():
+        front = cams["front"].data.output["rgb"][0, :, :, :3].cpu().numpy().astype(np.uint8)
+        wrist = (
+            wrist_cam.data.output["rgb"][0, :, :, :3].cpu().numpy().astype(np.uint8)
+            if wrist_cam is not None
+            else front
+        )
+        return front, wrist
 
     current_subtask = [args.task_text]
     results = []
@@ -109,10 +142,10 @@ with launch_simulation(env_cfg, args):
         outcome = "timeout"
         t = 0
         history: list[str] = []
-        planner_done = False  # planner thinks the task is finished; keep stepping for the placed window
+        planner_done = False  # planner thinks the task is finished; keep stepping for the success window
         if planner is not None:
-            obs, front = observation()
-            p = planner.plan(front, obs["video"]["wrist"][0, 0], args.task_text, history)
+            front, wrist = planner_images()
+            p = planner.plan(front, wrist, args.task_text, history)
             current_subtask[0] = p.get("subtask") or args.task_text
             print(f"[planner] -> {current_subtask[0]!r} (done={p.get('done')})", flush=True)
             planner_done = bool(p.get("done"))
@@ -129,6 +162,8 @@ with launch_simulation(env_cfg, args):
             action, _ = client.get_action(obs)
             latencies.append(1e3 * (time.perf_counter() - t0))
             chunk = np.concatenate([action["single_arm"][0], action["gripper"][0]], axis=-1)  # (H, 6) normalised
+            if chunk.ndim != 2 or chunk.shape[1] != 6 or not np.isfinite(chunk).all():
+                raise ValueError(f"Policy returned invalid joint targets: shape={chunk.shape}")
             horizon = min(args.action_horizon, chunk.shape[0])
             for h in range(horizon):
                 q = torch.as_tensor(norm_to_rad(chunk[h]), device=env.device).unsqueeze(0)
@@ -136,10 +171,12 @@ with launch_simulation(env_cfg, args):
                 if rec is not None:
                     rec.stdin.write(np.ascontiguousarray(cams["front"].data.output["rgb"][0, :, :, :3].cpu().numpy().astype(np.uint8)).tobytes())
                 t += 1
-                if bool(mdp.cube_dropped(env)[0]):
+                if t % 100 == 0:
+                    print(f"[eval] episode {ep + 1}: step {t}/{args.max_steps}, inference avg {np.mean(latencies):.0f} ms", flush=True)
+                if bool(is_dropped(env)[0]):
                     outcome = "dropped"
                     break
-                if bool(placed(env)[0]):
+                if bool(is_success(env)[0]):
                     success_count += 1
                     if success_count >= args.success_steps:
                         outcome = "success"
@@ -153,13 +190,13 @@ with launch_simulation(env_cfg, args):
                     and outcome == "timeout"
                     and not planner_done
                 ):
-                    front_now = cams["front"].data.output["rgb"][0, :, :, :3].cpu().numpy().astype(np.uint8)
+                    front_now, _ = planner_images()
                     v = planner.verify(front_now, current_subtask[0])
-                    print(f"[planner] verify {current_subtask[0]!r}: {v.get('done')} — {v.get('reason', '')}", flush=True)
+                    print(f"[planner] verify {current_subtask[0]!r}: {v.get('done')} - {v.get('reason', '')}", flush=True)
                     if v.get("done"):
                         history.append(current_subtask[0])
-                        obs, front = observation()
-                        p = planner.plan(front, obs["video"]["wrist"][0, 0], args.task_text, history)
+                        front, wrist = planner_images()
+                        p = planner.plan(front, wrist, args.task_text, history)
                         current_subtask[0] = p.get("subtask") or args.task_text
                         print(f"[planner] -> {current_subtask[0]!r} (done={p.get('done')})", flush=True)
                         planner_done = bool(p.get("done"))
@@ -172,9 +209,31 @@ with launch_simulation(env_cfg, args):
         results.append(outcome)
         print(f"[eval] episode {ep + 1}/{args.num_episodes}: {outcome} after {t} steps "
               f"(success so far {results.count('success')}/{len(results)}, inference avg {np.mean(latencies):.0f} ms)", flush=True)
-        env.reset()
+        if ep + 1 < args.num_episodes:
+            env.reset()
 
     print(f"[eval] success rate: {results.count('success')}/{len(results)} = {results.count('success') / max(len(results), 1):.2f}")
     print(f"[eval] outcomes: { {o: results.count(o) for o in set(results)} }")
+    if args.results_file:
+        path = os.path.abspath(args.results_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as file:
+            json.dump({
+                "scene": args.scene,
+                "task": args.task_text,
+                "seed": args.seed,
+                "action_horizon": args.action_horizon,
+                "max_steps": args.max_steps,
+                "success_steps": args.success_steps,
+                "episodes": len(results),
+                "successes": results.count("success"),
+                "outcomes": results,
+                "mean_inference_ms": float(np.mean(latencies)) if latencies else None,
+            }, file, indent=2)
     client.close()
+    if args.keep_open:
+        print("LEARNED_CONTROL_VIEWER_READY", flush=True)
+        while True:
+            env.sim.render()
+            time.sleep(1 / 30)
     env.close()

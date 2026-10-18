@@ -1,4 +1,4 @@
-"""MDP terms (observations, terminations) for the SO-101 block pick-and-place task."""
+"""MDP terms (observations, terminations) for the SO-101 block pick-and-place and Tower of Hanoi tasks."""
 
 from __future__ import annotations
 
@@ -120,3 +120,45 @@ def cube_dropped(env: ManagerBasedRLEnv, cube_cfg: SceneEntityCfg = SceneEntityC
     """True when the cube fell off the table."""
     cube: RigidObject = env.scene[cube_cfg.name]
     return cube.data.root_pos_w.torch[:, 2] < min_height
+
+
+def disks_on_peg(
+    env: ManagerBasedRLEnv,
+    disk_cfgs: list[SceneEntityCfg],
+    peg_pos: tuple[float, float, float],
+    xy_tol: float = 0.006,
+    max_height: float = 0.04,
+) -> torch.Tensor:
+    """Per-disk flag ``(N, D)``: disk threaded on the peg at ``peg_pos`` (env frame, board top surface level)."""
+    peg_w = env.scene.env_origins + torch.as_tensor(peg_pos, device=env.device, dtype=torch.float32)
+    flags = []
+    for cfg in disk_cfgs:
+        d = env.scene[cfg.name].data.root_pos_w.torch - peg_w
+        flags.append((torch.linalg.vector_norm(d[:, :2], dim=1) < xy_tol) & (d[:, 2] < max_height))
+    return torch.stack(flags, dim=1)
+
+
+def hanoi_solved(
+    env: ManagerBasedRLEnv,
+    disk_cfgs: list[SceneEntityCfg],
+    target_peg_pos: tuple[float, float, float],
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+    max_speed: float = 0.05,
+    gripper_open_above_rad: float = 1.0,
+    ee_clear_dist: float = 0.05,
+) -> torch.Tensor:
+    """Success: every disk threaded on the target peg, at rest, jaw open and grasp point clear of the disks."""
+    ee: FrameTransformer = env.scene[ee_frame_cfg.name]
+    ee_pos = ee.data.target_pos_w.torch[:, 0, :]
+    disks = [env.scene[cfg.name].data for cfg in disk_cfgs]
+    all_on = disks_on_peg(env, disk_cfgs, target_peg_pos).all(dim=1)
+    at_rest = torch.stack([torch.linalg.vector_norm(d.root_lin_vel_w.torch, dim=1) < max_speed for d in disks], dim=1).all(dim=1)
+    ee_clear = torch.stack([torch.linalg.vector_norm(d.root_pos_w.torch - ee_pos, dim=1) > ee_clear_dist for d in disks], dim=1).all(dim=1)
+    jaw_open = gripper_opening(env, robot_cfg).squeeze(1) > gripper_open_above_rad
+    return all_on & at_rest & ee_clear & jaw_open
+
+
+def disk_dropped(env: ManagerBasedRLEnv, disk_cfgs: list[SceneEntityCfg], min_height: float = -0.05) -> torch.Tensor:
+    """True when any disk fell off the table."""
+    return torch.stack([env.scene[cfg.name].data.root_pos_w.torch[:, 2] < min_height for cfg in disk_cfgs], dim=1).any(dim=1)

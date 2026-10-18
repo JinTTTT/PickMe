@@ -1,9 +1,7 @@
 """SO-101 single-block pick-and-place environment for GR00T N1.7 post-training data.
 
 Scene: SO-101 follower seated on the SeattleLab table (same seat pose as the contrib cube-stack
-task), one red block, one flat green target pad, a fixed third-person ``front`` camera and a
-``wrist`` camera on the gripper link -- the two views the SO-100/SO-101 GR00T modality config
-(``examples/SO100/so100_config.py``) expects.
+task), one red block, one flat green target pad, and a fixed third-person ``front`` camera.
 
 Five variants share the scene and differ only in the action space / target:
 
@@ -107,12 +105,6 @@ SO101_INIT_JOINT_POS: dict[str, float] = {
 # origin). Success region ~+-1 cm in each axis for the 30 mm block.
 GRASP_POINT_OFFSET = (-0.008 + CUBE_SIZE / 2 + 0.0125, 0.005, -0.062)
 
-# Wrist camera on the lateral (-Y) side of the gripper link, looking down the jaws so both jaws and
-# the block between them are in view. Position [m] + orientation (xyzw) in the link frame, "world"
-# camera convention (camera forward +X, up +Z).
-WRIST_CAM_POS = (0.0, -0.045, -0.03)
-WRIST_CAM_FORWARD = (0.0, 0.045, -0.055)  # from the mount toward the jaw tips
-
 # Front camera: in front of the table, looking back at the arm and both objects.
 FRONT_CAM_POS = (0.80, 0.0, 0.42)
 FRONT_CAM_LOOK_AT = (0.18, 0.0, 0.02)
@@ -157,10 +149,6 @@ def quat_xyzw_from_forward_up(forward, up) -> tuple[float, float, float, float]:
         s_ = math.sqrt(1.0 + m[2][2] - m[0][0] - m[1][1]) * 2
         w, x, y, z = (m[1][0] - m[0][1]) / s_, (m[0][2] + m[2][0]) / s_, (m[1][2] + m[2][1]) / s_, 0.25 * s_
     return (x, y, z, w)
-
-
-# camera "up" = the jaw direction rotated 90 deg in the y-z plane (image up ~ along -Z of the link)
-WRIST_CAM_ROT = quat_xyzw_from_forward_up(WRIST_CAM_FORWARD, (0.0, WRIST_CAM_FORWARD[2], -WRIST_CAM_FORWARD[1]))
 
 
 def look_at_quat_xyzw(eye: tuple[float, float, float], target: tuple[float, float, float]) -> tuple[float, float, float, float]:
@@ -238,17 +226,6 @@ class PickPlaceSceneCfg(InteractiveSceneCfg):
         ),
         offset=CameraCfg.OffsetCfg(pos=FRONT_CAM_POS, rot=look_at_quat_xyzw(FRONT_CAM_POS, FRONT_CAM_LOOK_AT), convention="world"),
     )
-    wrist_cam = CameraCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/gripper/wrist_cam",
-        update_period=0.0,
-        height=IMAGE_HEIGHT,
-        width=IMAGE_WIDTH,
-        data_types=["rgb"],
-        spawn=sim_utils.PinholeCameraCfg(
-            focal_length=14.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.02, 3.0)
-        ),
-        offset=CameraCfg.OffsetCfg(pos=WRIST_CAM_POS, rot=WRIST_CAM_ROT, convention="world"),
-    )
 
 
 ##
@@ -288,9 +265,6 @@ class ObservationsCfg:
         target_pose_b = ObsTerm(func=mdp.object_pose_in_base, params={"object_cfg": SceneEntityCfg("target")})
         front = ObsTerm(
             func=base_mdp.image, params={"sensor_cfg": SceneEntityCfg("front_cam"), "data_type": "rgb", "normalize": False}
-        )
-        wrist = ObsTerm(
-            func=base_mdp.image, params={"sensor_cfg": SceneEntityCfg("wrist_cam"), "data_type": "rgb", "normalize": False}
         )
 
         def __post_init__(self):
@@ -356,7 +330,7 @@ class SO101PickPlaceBaseEnvCfg(ManagerBasedRLEnvCfg):
     gripper_joint_names: list[str] = ["gripper"]
     gripper_open_val: float = GRIPPER_OPEN_RAD
     gripper_close_val: float = GRIPPER_CLOSE_RAD
-    image_obs_list: list[str] = ["front", "wrist"]
+    image_obs_list: list[str] = ["front"]
 
     def __post_init__(self):
         # 30 Hz control (LeRobot datasets are 30 fps), 60 Hz physics, render every control step.

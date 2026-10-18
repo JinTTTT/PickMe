@@ -61,10 +61,10 @@ with launch_simulation(env_cfg, args):
     robot = env.scene["robot"]
     jidx, _ = robot.find_joints(JOINTS, preserve_order=True)
     jidx = torch.as_tensor(jidx, device=env.device)
-    cams = {k: env.scene[f"{k}_cam"] for k in ("front", "wrist")}
+    cams = {"front": env.scene["front_cam"]}
 
     writer = LeRobotV21Writer(
-        args.dataset_root, task=args.task_text, fps=30, video_keys=("front", "wrist"),
+        args.dataset_root, task=args.task_text, fps=30, video_keys=("front",),
         image_hw=(IMAGE_HEIGHT, IMAGE_WIDTH), feature_names=FEATURE_NAMES, resume=args.resume,
     )
     policy = ScriptedPickPlace(
