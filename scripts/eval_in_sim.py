@@ -21,6 +21,10 @@ from _common import PROJECT_ROOT, build_env_cfg, launch_simulation, make_parser,
 parser = make_parser(__doc__)
 parser.add_argument("--num_episodes", type=int, default=10)
 parser.add_argument("--scene", choices=("cube", "hanoi"), default="cube", help="cube pick-and-place or Tower of Hanoi board.")
+parser.add_argument("--stack", action="store_true", help="Stack variant (cube scene): place the block on a second cube.")
+parser.add_argument("--planner_host", type=str, default="", help="Cosmos planner host; empty = planner off.")
+parser.add_argument("--planner_port", type=int, default=5556)
+parser.add_argument("--verify_every", type=int, default=30, help="Steps between Cosmos verify calls (0 = off).")
 parser.add_argument("--task_text", type=str, default=None, help="Language instruction (default depends on --scene).")
 parser.add_argument("--policy_host", type=str, default="localhost")
 parser.add_argument("--policy_port", type=int, default=5555)
@@ -32,12 +36,20 @@ parser.add_argument("--results_file", type=str, default="", help="Save evaluatio
 parser.add_argument("--keep_open", action="store_true", help="Keep the final scene visible after evaluation.")
 args = parse_args(parser)
 
-from so101_pickplace.pickplace_env_cfg import IMAGE_HEIGHT, IMAGE_WIDTH, SO101PickPlaceJointEnvCfg  # noqa: E402
+from so101_pickplace.pickplace_env_cfg import (  # noqa: E402
+    IMAGE_HEIGHT,
+    IMAGE_WIDTH,
+    SO101PickPlaceJointEnvCfg,
+    SO101PickPlaceStackJointEnvCfg,
+)
 
 if args.scene == "hanoi":
     from so101_pickplace.hanoi_env_cfg import HANOI_DROP_PARAMS, HANOI_SUCCESS_PARAMS, HANOI_TASK, SO101HanoiJointEnvCfg  # noqa: E402
 
     env_cfg_cls, default_task, default_max_steps = SO101HanoiJointEnvCfg, HANOI_TASK, 3600
+elif args.stack:
+    env_cfg_cls = SO101PickPlaceStackJointEnvCfg
+    default_task, default_max_steps = "pick up the red block and stack it on top of the green block", 600
 else:
     env_cfg_cls, default_task, default_max_steps = SO101PickPlaceJointEnvCfg, "pick up the red block and place it on the green pad", 600
 args.task_text = args.task_text or default_task
@@ -51,7 +63,8 @@ with launch_simulation(env_cfg, args):
     import torch
 
     import so101_pickplace  # noqa: F401
-    from so101_pickplace import TASK_HANOI_JOINT, TASK_JOINT, mdp
+    from so101_pickplace import TASK_HANOI_JOINT, TASK_JOINT, TASK_STACK_JOINT, mdp
+    from so101_pickplace.cosmos_planner import CosmosPlannerClient
     from so101_pickplace.gr00t_client import Gr00tClient, add_batch_time_dims
     from so101_pickplace.so101_units import JOINTS, norm_to_rad, rad_to_norm
 
@@ -59,8 +72,20 @@ with launch_simulation(env_cfg, args):
         task_id = TASK_HANOI_JOINT
         is_dropped = lambda env: mdp.disk_dropped(env, **HANOI_DROP_PARAMS)  # noqa: E731
         is_success = lambda env: mdp.hanoi_solved(env, **HANOI_SUCCESS_PARAMS)  # noqa: E731
+    elif args.stack:
+        task_id, is_dropped, is_success = TASK_STACK_JOINT, mdp.cube_dropped, mdp.cube_stacked
     else:
         task_id, is_dropped, is_success = TASK_JOINT, mdp.cube_dropped, mdp.cube_placed
+
+    planner = None
+    if args.planner_host:
+        planner = CosmosPlannerClient(args.planner_host, args.planner_port)
+        if not planner.ping():
+            raise SystemExit(
+                f"cosmos planner not reachable at {args.planner_host}:{args.planner_port} "
+                "(run scripts/cosmos_planner_server.py in the GR00T venv)"
+            )
+        print("[eval] cosmos planner connected", flush=True)
 
     client = Gr00tClient(args.policy_host, args.policy_port)
     if not client.ping():
@@ -79,6 +104,10 @@ with launch_simulation(env_cfg, args):
     jidx, _ = robot.find_joints(JOINTS, preserve_order=True)
     jidx = torch.as_tensor(jidx, device=env.device)
     cams = {"front": env.scene["front_cam"]}
+    try:
+        wrist_cam = env.scene["wrist_cam"]
+    except KeyError:  # hanoi board has no wrist camera; planner falls back to the front view
+        wrist_cam = None
     rec = None
     if args.record_dir:
         import subprocess
@@ -91,10 +120,20 @@ with launch_simulation(env_cfg, args):
         obs = {
             "video": {"front": np.ascontiguousarray(imgs["front"])},
             "state": {"single_arm": state[:5].astype(np.float32), "gripper": state[5:6].astype(np.float32)},
-            "language": {"annotation.human.task_description": args.task_text},
+            "language": {"annotation.human.task_description": current_subtask[0]},
         }
         return add_batch_time_dims(obs), imgs["front"]
 
+    def planner_images():
+        front = cams["front"].data.output["rgb"][0, :, :, :3].cpu().numpy().astype(np.uint8)
+        wrist = (
+            wrist_cam.data.output["rgb"][0, :, :, :3].cpu().numpy().astype(np.uint8)
+            if wrist_cam is not None
+            else front
+        )
+        return front, wrist
+
+    current_subtask = [args.task_text]
     results = []
     latencies = []
     for ep in range(args.num_episodes):
@@ -102,6 +141,14 @@ with launch_simulation(env_cfg, args):
         success_count = 0
         outcome = "timeout"
         t = 0
+        history: list[str] = []
+        planner_done = False  # planner thinks the task is finished; keep stepping for the success window
+        if planner is not None:
+            front, wrist = planner_images()
+            p = planner.plan(front, wrist, args.task_text, history)
+            current_subtask[0] = p.get("subtask") or args.task_text
+            print(f"[planner] -> {current_subtask[0]!r} (done={p.get('done')})", flush=True)
+            planner_done = bool(p.get("done"))
         if args.record_dir:
             path = os.path.join(args.record_dir, f"episode_{ep:03d}.mp4")
             rec = subprocess.Popen(
@@ -136,6 +183,24 @@ with launch_simulation(env_cfg, args):
                         break
                 else:
                     success_count = 0
+                if (
+                    planner is not None
+                    and args.verify_every > 0
+                    and t % args.verify_every == 0
+                    and outcome == "timeout"
+                    and not planner_done
+                ):
+                    front_now, _ = planner_images()
+                    v = planner.verify(front_now, current_subtask[0])
+                    print(f"[planner] verify {current_subtask[0]!r}: {v.get('done')} - {v.get('reason', '')}", flush=True)
+                    if v.get("done"):
+                        history.append(current_subtask[0])
+                        front, wrist = planner_images()
+                        p = planner.plan(front, wrist, args.task_text, history)
+                        current_subtask[0] = p.get("subtask") or args.task_text
+                        print(f"[planner] -> {current_subtask[0]!r} (done={p.get('done')})", flush=True)
+                        planner_done = bool(p.get("done"))
+                        break  # stale chunk was predicted for the old subtask; re-query the policy
                 if t >= args.max_steps:
                     break
         if rec is not None:

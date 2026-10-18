@@ -4,4 +4,6 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 cd "$PROJECT_DIR"
-exec "$ISAACLAB_PY" scripts/eval_in_sim.py --task_text "$TASK" --policy_host "$POLICY_HOST" --policy_port "$POLICY_PORT" "$@"
+TASK_TO_USE="$TASK"
+for a in "$@"; do [ "$a" = "--stack" ] && TASK_TO_USE="$TASK_STACK"; done
+exec "$ISAACLAB_PY" scripts/eval_in_sim.py --task_text "$TASK_TO_USE" --policy_host "$POLICY_HOST" --policy_port "$POLICY_PORT" "$@"

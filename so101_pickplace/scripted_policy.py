@@ -42,7 +42,11 @@ class ScriptedPolicyCfg:
     speed: float = 0.012
     """Max grasp-point travel per control step [m] (interpolated targets keep the IK smooth)."""
     align_yaw: bool = True
+    stack: bool = False
+    """Place on top of the target cube (stack env) instead of on the flat pad."""
     cube_size: float = 0.030
+    target_size: float = 0.030
+    """Target cube edge [m]; only used when ``stack`` is True."""
     pad_thickness: float = 0.004
     gripper_open_rad: float = 1.5
     gripper_close_rad: float = -0.1
@@ -165,12 +169,19 @@ class ScriptedPickPlace:
         lift = grasp.clone()
         lift[:, 2] = cube_z + cfg.lift_height
         hover_t = pad_pos_b.clone() + self.jitter[:, 1]
-        hover_t[:, 2] = pad_pos_b[:, 2] + cfg.lift_height
         place = pad_pos_b.clone() + self.jitter[:, 1]
-        # resting block centre = pad top + half a block; release slightly above that
-        place[:, 2] = pad_pos_b[:, 2] + cfg.pad_thickness / 2 + cfg.cube_size / 2 + cfg.place_height
-        retreat = place.clone()
-        retreat[:, 2] = pad_pos_b[:, 2] + self.hover_h + 0.03
+        if cfg.stack:
+            # approach and release relative to the target cube's top face
+            hover_t[:, 2] = pad_pos_b[:, 2] + cfg.target_size + cfg.lift_height
+            place[:, 2] = pad_pos_b[:, 2] + cfg.target_size / 2 + cfg.cube_size / 2 + cfg.place_height
+            retreat = place.clone()
+            retreat[:, 2] = pad_pos_b[:, 2] + cfg.target_size + self.hover_h + 0.03
+        else:
+            hover_t[:, 2] = pad_pos_b[:, 2] + cfg.lift_height
+            # resting block centre = pad top + half a block; release slightly above that
+            place[:, 2] = pad_pos_b[:, 2] + cfg.pad_thickness / 2 + cfg.cube_size / 2 + cfg.place_height
+            retreat = place.clone()
+            retreat[:, 2] = pad_pos_b[:, 2] + self.hover_h + 0.03
 
         waypoints = torch.stack([ee_pos, hover_c, grasp, grasp, lift, hover_t, place, place, retreat, retreat], dim=1)
         target = waypoints[torch.arange(self.n, device=self.device), self.phase]

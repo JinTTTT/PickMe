@@ -87,6 +87,35 @@ def cube_placed(
     return on_pad_xy & on_pad_z & at_rest & jaw_open & ee_clear
 
 
+def cube_stacked(
+    env: ManagerBasedRLEnv,
+    cube_cfg: SceneEntityCfg = SceneEntityCfg("cube"),
+    target_cfg: SceneEntityCfg = SceneEntityCfg("target"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+    xy_tol: float = 0.03,
+    max_speed: float = 0.05,
+    gripper_open_above_rad: float = 1.0,
+    ee_clear_dist: float = 0.05,
+) -> torch.Tensor:
+    """Success for stacking: ``cube`` resting on top of the target cube, released and clear.
+
+    For the printable cube set (25-40 mm) the centres of a stacked pair sit ~25-80 mm apart in z;
+    the 15-50 mm window accepts that while rejecting a cube merely standing on the table next to
+    the target.
+    """
+    cube: RigidObject = env.scene[cube_cfg.name]
+    target: RigidObject = env.scene[target_cfg.name]
+    ee: FrameTransformer = env.scene[ee_frame_cfg.name]
+    d = cube.data.root_pos_w.torch - target.data.root_pos_w.torch
+    on_top_xy = torch.linalg.vector_norm(d[:, :2], dim=1) < xy_tol
+    on_top_z = (d[:, 2] > 0.015) & (d[:, 2] < 0.05)
+    at_rest = torch.linalg.vector_norm(cube.data.root_lin_vel_w.torch, dim=1) < max_speed
+    jaw_open = gripper_opening(env, robot_cfg).squeeze(1) > gripper_open_above_rad
+    ee_clear = torch.linalg.vector_norm(cube.data.root_pos_w.torch - ee.data.target_pos_w.torch[:, 0, :], dim=1) > ee_clear_dist
+    return on_top_xy & on_top_z & at_rest & jaw_open & ee_clear
+
+
 def cube_dropped(env: ManagerBasedRLEnv, cube_cfg: SceneEntityCfg = SceneEntityCfg("cube"), min_height: float = -0.05) -> torch.Tensor:
     """True when the cube fell off the table."""
     cube: RigidObject = env.scene[cube_cfg.name]

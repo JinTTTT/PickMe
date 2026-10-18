@@ -7,8 +7,10 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 mkdir -p "$PROJECT_DIR/logs"
 cd "$PROJECT_DIR"
+TASK_TO_USE="$TASK"
+for a in "$@"; do [ "$a" = "--stack" ] && TASK_TO_USE="$TASK_STACK"; done
 exec "$ISAACLAB_PY" scripts/collect_demos.py \
     --num_episodes "$NUM_EPISODES" \
     --dataset_root "$DATASET_ROOT" \
-    --task_text "$TASK" \
+    --task_text "$TASK_TO_USE" \
     "$@" 2>&1 | tee -a "$PROJECT_DIR/logs/collect.log"

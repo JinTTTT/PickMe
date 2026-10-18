@@ -16,17 +16,32 @@ from _common import build_env_cfg, launch_simulation, make_parser, parse_args
 parser = make_parser(__doc__)
 parser.add_argument("--num_episodes", type=int, default=50, help="Successful episodes to record.")
 parser.add_argument("--dataset_root", type=str, required=True)
-parser.add_argument("--task_text", type=str, default="pick up the red block and place it on the green pad")
+parser.add_argument("--task_text", type=str, default="", help="Overall task; defaults per variant.")
 parser.add_argument("--max_steps", type=int, default=600, help="Per-episode step cap (30 Hz).")
 parser.add_argument("--success_steps", type=int, default=15, help="Consecutive success steps before ending an episode.")
+parser.add_argument("--stack", action="store_true", help="Stack variant: place the block on a second cube.")
 parser.add_argument("--resume", action="store_true")
 parser.add_argument("--keep_failures", action="store_true", help="Also store failed episodes (not recommended).")
 parser.add_argument("--max_attempts", type=int, default=0, help="Give up after this many attempts (0 = 3x num_episodes).")
 args = parse_args(parser)
+if not args.task_text:
+    args.task_text = (
+        "pick up the red block and stack it on top of the green block"
+        if args.stack
+        else "pick up the red block and place it on the green pad"
+    )
 
-from so101_pickplace.pickplace_env_cfg import CUBE_SIZE, IMAGE_HEIGHT, IMAGE_WIDTH, PAD_SIZE, SO101PickPlaceIKEnvCfg  # noqa: E402
+from so101_pickplace.pickplace_env_cfg import (  # noqa: E402
+    CUBE2_SIZE,
+    CUBE_SIZE,
+    IMAGE_HEIGHT,
+    IMAGE_WIDTH,
+    PAD_SIZE,
+    SO101PickPlaceIKEnvCfg,
+    SO101PickPlaceStackIKEnvCfg,
+)
 
-env_cfg = build_env_cfg(SO101PickPlaceIKEnvCfg, args)
+env_cfg = build_env_cfg(SO101PickPlaceStackIKEnvCfg if args.stack else SO101PickPlaceIKEnvCfg, args)
 assert env_cfg.scene.num_envs == 1, "the collector records one env at a time"
 
 with launch_simulation(env_cfg, args):
@@ -35,12 +50,13 @@ with launch_simulation(env_cfg, args):
     import torch
 
     import so101_pickplace  # noqa: F401
-    from so101_pickplace import TASK_IK, mdp
+    from so101_pickplace import TASK_IK, TASK_STACK_IK, mdp
     from so101_pickplace.lerobot_writer import LeRobotV21Writer
     from so101_pickplace.scripted_policy import ScriptedPickPlace, ScriptedPolicyCfg
     from so101_pickplace.so101_units import FEATURE_NAMES, JOINTS, rad_to_norm
 
-    env = gym.make(TASK_IK, cfg=env_cfg).unwrapped
+    placed = mdp.cube_stacked if args.stack else mdp.cube_placed
+    env = gym.make(TASK_STACK_IK if args.stack else TASK_IK, cfg=env_cfg).unwrapped
     env.reset(seed=args.seed)
     robot = env.scene["robot"]
     jidx, _ = robot.find_joints(JOINTS, preserve_order=True)
@@ -51,7 +67,9 @@ with launch_simulation(env_cfg, args):
         args.dataset_root, task=args.task_text, fps=30, video_keys=("front",),
         image_hw=(IMAGE_HEIGHT, IMAGE_WIDTH), feature_names=FEATURE_NAMES, resume=args.resume,
     )
-    policy = ScriptedPickPlace(env, ScriptedPolicyCfg(cube_size=CUBE_SIZE, pad_thickness=PAD_SIZE[2]))
+    policy = ScriptedPickPlace(
+        env, ScriptedPolicyCfg(stack=args.stack, cube_size=CUBE_SIZE, target_size=CUBE2_SIZE, pad_thickness=PAD_SIZE[2])
+    )
     target_total = writer.num_episodes + args.num_episodes
     max_attempts = args.max_attempts or 3 * args.num_episodes
     attempts = successes = 0
@@ -74,7 +92,7 @@ with launch_simulation(env_cfg, args):
             if bool(mdp.cube_dropped(env)[0]):
                 outcome = "dropped"
                 break
-            if bool(mdp.cube_placed(env)[0]):
+            if bool(placed(env)[0]):
                 success_count += 1
                 if success_count >= args.success_steps:
                     outcome = "success"
